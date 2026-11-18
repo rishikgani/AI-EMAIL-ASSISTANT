@@ -246,6 +246,9 @@ if not st.session_state.get("auth_verified"):
 session_id = get_or_create_session()
 authenticated_identifier = st.session_state["auth_identifier"]
 
+# Initialize OAuth callback handling (must be before any page rendering)
+init_oauth_callback_handling()
+
 
 def render_email_assistant() -> None:
     st.title("AI Email Assistant Agent")
@@ -618,9 +621,11 @@ with st.sidebar:
         ):
             st.session_state.pop(key, None)
         st.rerun()
-    page = st.radio("Navigate", ["Email assistant", "Host dashboard"], label_visibility="collapsed")
+    page = st.radio("Navigate", ["Email assistant", "Host dashboard", "Connected Accounts"], label_visibility="collapsed")
 
 if page == "Host dashboard":
     render_host_dashboard(authenticated_identifier)
+elif page == "Connected Accounts":
+    render_oauth_wizard()
 else:
     render_email_assistant()

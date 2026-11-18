@@ -58,7 +58,7 @@ class Database:
         if db_path is not None:
             self.db_path = db_path
         else:
-            self.db_path = self.settings.data_dir / "email_assistant.db"
+            self.db_path = Path(self.settings.email_assistant_db)
         self.attachments_dir = self.db_path.parent / "attachments"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.attachments_dir.mkdir(parents=True, exist_ok=True)

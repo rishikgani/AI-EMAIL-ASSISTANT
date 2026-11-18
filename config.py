@@ -4,6 +4,7 @@ Centralizes all environment variables and secrets.
 """
 
 import tomllib
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
@@ -13,15 +14,23 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 
 def read_streamlit_secrets() -> dict[str, Any]:
-    """Read settings from .streamlit/secrets.toml if it exists."""
+    """Read settings from Streamlit Cloud secrets and the local secrets file."""
+    import streamlit as st
+    from streamlit.errors import StreamlitSecretNotFoundError
+
+    secrets: dict[str, Any] = {}
+    with suppress(StreamlitSecretNotFoundError):
+        secrets.update(dict(st.secrets))
+
     secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
     if not secrets_path.exists():
-        return {}
+        return secrets
     try:
         with secrets_path.open("rb") as f:
-            return tomllib.load(f)
+            secrets.update(tomllib.load(f))
     except tomllib.TOMLDecodeError:
-        return {}
+        return secrets
+    return secrets
 
 
 class StreamlitSecretsSource(PydanticBaseSettingsSource):

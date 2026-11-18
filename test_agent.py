@@ -163,7 +163,8 @@ class DraftDatabaseTests(unittest.TestCase):
                     "INSERT INTO drafts VALUES (1, 'Old', 'Draft', 'Request', 'generate', '', '', 'today')"
                 )
             database.set_test_database_path(path)
-            database.initialize_database()
+            with patch("database.crypto_manager.is_encrypted", return_value=False):
+                database.initialize_database()
             with closing(sqlite3.connect(path)) as connection:
                 column_names = {row[1] for row in connection.execute("PRAGMA table_info(drafts)")}
             self.assertIn("owner_identifier", column_names)

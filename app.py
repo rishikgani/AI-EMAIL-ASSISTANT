@@ -261,7 +261,7 @@ def render_email_assistant() -> None:
         provider = st.radio(
             "LLM Provider",
             ["Ollama (Local)", "OpenAI", "Anthropic"],
-            help="Choose local Ollama or cloud providers. Cloud providers require API keys in secrets.toml.",
+            help="Choose local Ollama or a cloud provider. Cloud providers require API keys in Streamlit secrets.",
         )
 
         if provider == "Ollama (Local)":
@@ -281,8 +281,8 @@ def render_email_assistant() -> None:
             api_key = st.text_input(
                 "OpenAI API Key",
                 type="password",
-                value=os.environ.get("OPENAI_API_KEY", ""),
-                help="Stored in session only. Add to .streamlit/secrets.toml for persistence.",
+                value=get_settings().openai_api_key,
+                help="Configured in Streamlit secrets or your environment.",
             )
             st.caption("Uses OpenAI API. Requires valid API key with credits.")
         else:  # Anthropic
@@ -294,8 +294,8 @@ def render_email_assistant() -> None:
             api_key = st.text_input(
                 "Anthropic API Key",
                 type="password",
-                value=os.environ.get("ANTHROPIC_API_KEY", ""),
-                help="Stored in session only. Add to .streamlit/secrets.toml for persistence.",
+                value=get_settings().anthropic_api_key,
+                help="Configured in Streamlit secrets or your environment.",
             )
             st.caption("Uses Anthropic API. Requires valid API key with credits.")
 

@@ -10,6 +10,7 @@ from agent import ModelResponseError, parse_model_response
 from auth import (
     AuthDeliveryError,
     _load_settings,
+    hash_trusted_browser_token,
     hash_verification_code,
     normalize_identifier,
     send_verification_code,
@@ -17,6 +18,12 @@ from auth import (
 )
 from config import get_settings
 from email_tools import EmailAction, detect_action
+from oauth_wizard import (
+    get_stored_google_tokens,
+    get_stored_outlook_tokens,
+    store_google_tokens,
+    store_outlook_tokens,
+)
 
 
 class ActionDetectionTests(unittest.TestCase):
@@ -175,6 +182,69 @@ class DraftDatabaseTests(unittest.TestCase):
             import shutil
             shutil.rmtree(directory, ignore_errors=True)
 
+    def test_migrates_legacy_body_column_before_encrypting_drafts(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    """
+                    CREATE TABLE drafts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        subject TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        original_request TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT '',
+                        reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO drafts (
+                        id, subject, body, original_request, action,
+                        category, reason, created_at
+                    ) VALUES (1, 'Old', 'Draft', 'Request', 'generate', '', '', 'today')
+                    """
+                )
+
+            database.set_test_database_path(path)
+            with (
+                patch.object(database.crypto_manager, "is_encrypted", return_value=True),
+                patch.object(
+                    database.crypto_manager,
+                    "encrypt",
+                    side_effect=lambda value: f"enc:{value}",
+                ),
+                patch.object(
+                    database.crypto_manager,
+                    "decrypt",
+                    side_effect=lambda value: value[4:] if value.startswith("enc:") else value,
+                ),
+            ):
+                db = database.get_database()
+                draft = db.get_draft(1)
+
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft.subject, "Old")
+            self.assertEqual(draft.body_text, "Draft")
+            self.assertEqual(draft.updated_at, "today")
+            with closing(sqlite3.connect(path)) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(drafts)")}
+                encryption_version = connection.execute(
+                    "SELECT encryption_version FROM drafts WHERE id = 1"
+                ).fetchone()[0]
+            self.assertIn("body_text", columns)
+            self.assertIn("updated_at", columns)
+            self.assertEqual(encryption_version, 1)
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
     def test_saved_draft_is_available_in_history_and_by_id(self) -> None:
         directory = tempfile.mkdtemp()
         try:
@@ -221,6 +291,25 @@ class DraftDatabaseTests(unittest.TestCase):
             self.assertEqual(database.get_login_challenge("user@example.com")["attempts"], 1)
             self.assertTrue(database.clear_login_challenge("user@example.com", "hash"))
             self.assertIsNone(database.get_login_challenge("user@example.com"))
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_trusted_browser_tokens_expire_and_can_be_revoked(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            database.set_test_database_path(path)
+            db = database.get_database()
+            token_hash = hash_trusted_browser_token("random-browser-token")
+            db.create_trusted_browser(token_hash, "user@example.com", 100.0, 200.0)
+
+            self.assertEqual(db.get_trusted_browser_owner(token_hash, 199.0), "user@example.com")
+            self.assertIsNone(db.get_trusted_browser_owner(token_hash, 200.0))
+            self.assertTrue(db.delete_trusted_browser(token_hash))
+            self.assertIsNone(db.get_trusted_browser_owner(token_hash, 199.0))
         finally:
             database._database = None
             database._test_db_path = None
@@ -306,6 +395,78 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings_dict["EMAIL_SMTP_PORT"], "587")
             self.assertEqual(settings_dict["GMAIL_CLIENT_ID"], "gmail_id")
             self.assertEqual(settings_dict["OPENAI_API_KEY"], "openai_key")
+
+
+class OAuthTokenTests(unittest.TestCase):
+    """Test OAuth token storage and retrieval."""
+
+    def tearDown(self) -> None:
+        database._database = None
+        database._test_db_path = None
+
+    def test_store_and_retrieve_google_tokens(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            database.set_test_database_path(path)
+            store_google_tokens("access_token_123", "refresh_token_456", 3600)
+            tokens = get_stored_google_tokens()
+            self.assertIsNotNone(tokens)
+            self.assertEqual(tokens["access_token"], "access_token_123")
+            self.assertEqual(tokens["refresh_token"], "refresh_token_456")
+            self.assertGreater(tokens["expires_at"], 0)
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_store_and_retrieve_outlook_tokens(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            database.set_test_database_path(path)
+            store_outlook_tokens("access_token_789", "refresh_token_012", 3600)
+            tokens = get_stored_outlook_tokens()
+            self.assertIsNotNone(tokens)
+            self.assertEqual(tokens["access_token"], "access_token_789")
+            self.assertEqual(tokens["refresh_token"], "refresh_token_012")
+            self.assertGreater(tokens["expires_at"], 0)
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_delete_google_tokens(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            database.set_test_database_path(path)
+            store_google_tokens("access_token_123", "refresh_token_456", 3600)
+            db = database.get_database()
+            self.assertTrue(db.delete_google_tokens())
+            self.assertIsNone(get_stored_google_tokens())
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_delete_outlook_tokens(self) -> None:
+        directory = tempfile.mkdtemp()
+        try:
+            path = Path(directory) / "drafts.sqlite3"
+            database.set_test_database_path(path)
+            store_outlook_tokens("access_token_789", "refresh_token_012", 3600)
+            db = database.get_database()
+            self.assertTrue(db.delete_outlook_tokens())
+            self.assertIsNone(get_stored_outlook_tokens())
+        finally:
+            database._database = None
+            database._test_db_path = None
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 # AI Email Assistant Agent
 
-A Streamlit application that identifies an email task, calls a local Ollama model through LangChain, and saves editable drafts in SQLite. It can generate a new email, suggest a reply, or categorize a message as Work, Personal, or Urgent. It never sends email.
+A Streamlit application that identifies an email task, calls either a local Ollama model or a cloud model through LangChain, and saves editable drafts in SQLite. It can generate a new email, suggest a reply, or categorize a message as Work, Personal, or Urgent. It never sends email.
 
 ## Requirements
 
 - Python 3.11 or newer
-- [Ollama](https://ollama.com/) installed and running locally
-- A model downloaded in Ollama, for example `llama3.2`
+- [Ollama](https://ollama.com/) installed and a model downloaded, for example `llama3.2` (the default, no paid API needed)
+- Optional cloud AI: an OpenAI or Anthropic API key
 
 ## Run on Windows
 
@@ -27,7 +27,7 @@ If PowerShell prevents environment activation, run the venv's Python directly:
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Use the sidebar to select a different model already installed in Ollama. Ollama must be running at `http://localhost:11434`. Drafts are stored in `data/drafts.sqlite3`; set `EMAIL_ASSISTANT_DB` to use another SQLite file.
+The sidebar defaults to **Ollama (Local)** and uses the model you pulled above. Ollama must be running at `http://localhost:11434`. OpenAI and Anthropic are optional cloud providers and require their own API keys and may incur charges. Drafts are stored in `data/drafts.sqlite3`; set `EMAIL_ASSISTANT_DB` to use another SQLite file.
 
 The app's dark navy and teal theme is configured in `.streamlit/config.toml`. Its logo artwork is in `assets/`.
 Use the sidebar navigation to switch between the email assistant and the host dashboard. The dashboard reports Ollama availability, installed models, app runtime details, and SQLite draft storage.
@@ -45,7 +45,7 @@ Use the sidebar navigation to switch between the email assistant and the host da
    ```
 
    Add the output as `ENCRYPTION_KEY` in the Cloud secrets.
-6. Configure at least one Cloud LLM provider (OpenAI or Anthropic) or rely on Ollama only for local development.
+6. Configure `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in Streamlit Community Cloud secrets to use a cloud model. Streamlit Community Cloud cannot connect to Ollama running on your personal computer, so cloud inference requires a provider account and may incur charges.
 7. Configure Gmail SMTP or another SMTP provider for sign-in and email sending.
 8. Deploy the app.
 
@@ -60,6 +60,19 @@ Use the sidebar navigation to switch between the email assistant and the host da
 
 The app requires a one-time code sent to the user's email or phone. Configure the matching delivery provider before starting Streamlit; do not put credentials in the source code or commit them. The ignored `.streamlit/secrets.toml` file can hold credentials locally; environment variables override matching file settings.
 Without provider settings, the app intentionally blocks sign-in rather than accepting an unverified identifier.
+After successful verification, select **Remember this browser for 30 days** to skip the code on later sign-ins from that browser. New browsers still require a code, and signing out revokes the remembered browser. Do not select this option on a shared or public computer.
+
+### Google sign-in
+
+The sign-in page also supports Google OpenID Connect (OIDC). It uses the Google account's verified email as the user's identifier; email/phone OTP remains available as a fallback. Google sign-in is disabled until the OIDC settings are configured in `.streamlit/secrets.toml` (see `.streamlit/secrets.toml.example`).
+
+Create a Google OAuth client ID for a web application. Add `http://localhost:8501/oauth2callback` as an authorized redirect URI in Google Cloud Console, and configure `[auth]` plus `[auth.google]` in the local secrets file. Generate `cookie_secret` with:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+For deployment, set `redirect_uri` and Google's authorized redirect URI to the deployed app URL ending in `/oauth2callback`. Keep all client secrets out of source control. This Google app sign-in is separate from the OAuth connection under **Connected Accounts**, which grants Gmail mailbox access.
 
 For email delivery over SMTP with STARTTLS, set:
 

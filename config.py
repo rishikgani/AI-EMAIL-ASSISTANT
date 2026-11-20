@@ -4,6 +4,7 @@ Centralizes all environment variables and secrets.
 """
 
 import tomllib
+from collections.abc import Mapping
 from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
@@ -31,6 +32,29 @@ def read_streamlit_secrets() -> dict[str, Any]:
     except tomllib.TOMLDecodeError:
         return secrets
     return secrets
+
+
+def has_google_login_config() -> bool:
+    """Return whether Streamlit's Google OIDC login is fully configured."""
+    auth_settings = read_streamlit_secrets().get("auth")
+    if not isinstance(auth_settings, Mapping):
+        return False
+    google_settings = auth_settings.get("google")
+    if not isinstance(google_settings, Mapping):
+        return False
+    required_values = (
+        auth_settings.get("redirect_uri"),
+        auth_settings.get("cookie_secret"),
+        google_settings.get("client_id"),
+        google_settings.get("client_secret"),
+        google_settings.get("server_metadata_url"),
+    )
+    return all(
+        isinstance(value, str)
+        and bool(value.strip())
+        and not value.strip().lower().startswith(("replace-with-", "your-"))
+        for value in required_values
+    )
 
 
 class StreamlitSecretsSource(PydanticBaseSettingsSource):

@@ -53,6 +53,10 @@ def verify_code(code: str, salt: str, expected_hash: str) -> bool:
     return hmac.compare_digest(hash_verification_code(code, salt), expected_hash)
 
 
+def hash_trusted_browser_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def mask_identifier(method: str, identifier: str) -> str:
     if method == "Email":
         local_part, domain = identifier.split("@", maxsplit=1)

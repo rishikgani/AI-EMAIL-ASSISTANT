@@ -14,13 +14,14 @@ from attachment_handler import process_uploaded_file
 from auth import (
     AuthDeliveryError,
     create_verification_code,
+    hash_trusted_browser_token,
     hash_verification_code,
     mask_identifier,
     normalize_identifier,
     send_verification_code,
     verify_code,
 )
-from config import get_settings
+from config import get_settings, has_google_login_config
 from database import get_database, save_draft
 from email_sender import send_email
 from email_tools import ACTION_LABELS, EmailAction, EmailAttachment
@@ -30,6 +31,36 @@ from session import get_session_manager
 OTP_LIFETIME_SECONDS = 300
 OTP_RESEND_SECONDS = 30
 OTP_MAX_ATTEMPTS = 5
+TRUSTED_BROWSER_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+TRUSTED_BROWSER_COOKIE = "email_assistant_trusted_browser"
+
+_COOKIE_WRITER = st.components.v2.component(
+    "email_assistant_trusted_browser_cookie",
+    html="<span></span>",
+    js="""\
+export default function (component) {
+  const { data } = component
+  if (!data) return
+
+  const cookie = `${encodeURIComponent(data.name)}=${encodeURIComponent(data.value)}`
+    + `; Path=/; Max-Age=${data.max_age}; SameSite=Strict`
+    + (data.secure ? "; Secure" : "")
+  document.cookie = cookie
+}
+""",
+)
+
+
+def write_trusted_browser_cookie(token: str, *, secure: bool, max_age: int) -> None:
+    _COOKIE_WRITER(
+        data={
+            "name": TRUSTED_BROWSER_COOKIE,
+            "value": token,
+            "max_age": max_age,
+            "secure": secure,
+        },
+        key="trusted_browser_cookie",
+    )
 
 
 def is_smtp_configured() -> bool:
@@ -60,6 +91,7 @@ st.logo(
     size="large",
     icon_image="assets/email_assistant_icon.svg",
 )
+google_login_configured = has_google_login_config()
 
 
 def load_draft_into_editor(draft: object) -> None:
@@ -142,6 +174,19 @@ def resend_sign_in_code(method: str, identifier: str) -> None:
 def render_sign_in() -> None:
     st.title("Sign in")
     st.caption("Use your email address or phone number. We'll send you a one-time verification code.")
+    if google_login_configured:
+        if st.button("Continue with Google", type="primary", width="stretch"):
+            st.login("google")
+            st.stop()
+    else:
+        st.button(
+            "Continue with Google",
+            disabled=True,
+            width="stretch",
+            help="Configure Google OIDC in .streamlit/secrets.toml to enable this option.",
+        )
+        st.caption("Google sign-in needs Google OAuth credentials in `.streamlit/secrets.toml`.")
+    st.divider()
     st.caption(
         "Email codes require SMTP settings; phone codes require Twilio settings. "
         "Add provider credentials to .streamlit/secrets.toml or your environment—never paste them here."
@@ -199,6 +244,11 @@ def render_sign_in() -> None:
                     max_chars=6,
                     placeholder="123456",
                 )
+                remember_browser = st.checkbox(
+                    "Remember this browser for 30 days",
+                    value=True,
+                    help="Leave this off on a shared or public computer.",
+                )
                 verify_clicked = st.form_submit_button("Verify and sign in", type="primary")
             if verify_clicked:
                 if (
@@ -210,6 +260,22 @@ def render_sign_in() -> None:
                     if db.clear_login_challenge(identifier, stored_challenge["code_hash"]):
                         st.session_state["auth_verified"] = True
                         st.session_state["auth_identifier"] = identifier
+                        st.session_state["auth_provider"] = "otp"
+                        st.session_state["trusted_browser_cookie_cleared"] = not remember_browser
+                        st.session_state["trusted_browser_token"] = None
+                        if remember_browser:
+                            token = secrets.token_urlsafe(32)
+                            now = time.time()
+                            db.create_trusted_browser(
+                                hash_trusted_browser_token(token),
+                                identifier,
+                                now,
+                                now + TRUSTED_BROWSER_LIFETIME_SECONDS,
+                            )
+                            st.session_state["trusted_browser_token"] = token
+                            st.session_state["trusted_browser_cookie_action"] = "set"
+                        else:
+                            st.session_state["trusted_browser_cookie_action"] = "clear"
                         st.session_state.pop("auth_challenge", None)
                         st.rerun()
                     feedback = "A newer code was requested. Enter the latest code."
@@ -238,6 +304,58 @@ def render_sign_in() -> None:
         )
 
 
+google_auth_error = None
+if google_login_configured and st.user.is_logged_in:
+    google_email = st.user.get("email")
+    if st.user.get("email_verified") is not True:
+        google_auth_error = "Google sign-in requires a verified Google email address."
+    elif not isinstance(google_email, str):
+        google_auth_error = "Google did not provide an email address for this account."
+    else:
+        try:
+            st.session_state["auth_identifier"] = normalize_identifier("Email", google_email)
+        except ValueError:
+            google_auth_error = "Google did not provide a valid email address."
+        else:
+            st.session_state["auth_verified"] = True
+            st.session_state["auth_provider"] = "google"
+
+cookie_action = st.session_state.pop("trusted_browser_cookie_action", None)
+if cookie_action == "set":
+    token = st.session_state["trusted_browser_token"]
+    write_trusted_browser_cookie(
+        token,
+        secure=st.context.url.lower().startswith("https://"),
+        max_age=TRUSTED_BROWSER_LIFETIME_SECONDS,
+    )
+elif cookie_action == "clear":
+    write_trusted_browser_cookie(
+        "",
+        secure=st.context.url.lower().startswith("https://"),
+        max_age=0,
+    )
+
+if not st.session_state.get("auth_verified") and not st.session_state.get(
+    "trusted_browser_cookie_cleared"
+):
+    browser_token = st.context.cookies.get(TRUSTED_BROWSER_COOKIE)
+    if browser_token:
+        browser_identifier = get_database().get_trusted_browser_owner(
+            hash_trusted_browser_token(browser_token),
+            time.time(),
+        )
+        if browser_identifier:
+            st.session_state["auth_verified"] = True
+            st.session_state["auth_identifier"] = browser_identifier
+            st.session_state["auth_provider"] = "otp"
+            st.session_state["trusted_browser_token"] = browser_token
+
+if google_auth_error:
+    st.error(google_auth_error)
+    if st.button("Sign out of Google", key="invalid_google_sign_out"):
+        st.logout()
+    st.stop()
+
 if not st.session_state.get("auth_verified"):
     render_sign_in()
     st.stop()
@@ -261,6 +379,7 @@ def render_email_assistant() -> None:
         provider = st.radio(
             "LLM Provider",
             ["Ollama (Local)", "OpenAI", "Anthropic"],
+            index=0,
             help="Choose local Ollama or a cloud provider. Cloud providers require API keys in Streamlit secrets.",
         )
 
@@ -609,9 +728,19 @@ def render_host_dashboard(owner_identifier: str) -> None:
 with st.sidebar:
     st.caption(f"Signed in as {mask_identifier('Email' if '@' in authenticated_identifier else 'Phone', authenticated_identifier)}")
     if st.button("Sign out", width="stretch"):
+        auth_provider = st.session_state.get("auth_provider", "otp")
+        trusted_token = st.session_state.get("trusted_browser_token")
+        if trusted_token:
+            get_database().delete_trusted_browser(
+                hash_trusted_browser_token(trusted_token)
+            )
+            st.session_state["trusted_browser_cookie_action"] = "clear"
+        st.session_state["trusted_browser_cookie_cleared"] = True
         for key in (
             "auth_verified",
             "auth_identifier",
+            "auth_provider",
+            "trusted_browser_token",
             "auth_challenge",
             "draft_result",
             "draft_request",
@@ -620,6 +749,9 @@ with st.sidebar:
             "session_id",
         ):
             st.session_state.pop(key, None)
+        if auth_provider == "google":
+            st.logout()
+            st.stop()
         st.rerun()
     page = st.radio("Navigate", ["Email assistant", "Host dashboard", "Connected Accounts"], label_visibility="collapsed")
 

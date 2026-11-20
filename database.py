@@ -164,6 +164,15 @@ class Database:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trusted_browsers (
+                    token_hash TEXT PRIMARY KEY,
+                    owner_identifier TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+            """)
+
             # Create indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_drafts_created_at ON drafts(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_drafts_category ON drafts(category)")
@@ -177,8 +186,19 @@ class Database:
     def _run_migrations(self, conn: sqlite3.Connection) -> None:
         """Run database migrations."""
         # Migration: Add encryption_version column if not exists
-        with suppress(sqlite3.OperationalError):
-            conn.execute("ALTER TABLE drafts ADD COLUMN encryption_version INTEGER DEFAULT 1")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(drafts)")}
+        if "encryption_version" not in columns:
+            # Existing rows predate the encryption marker and must be encrypted.
+            conn.execute("ALTER TABLE drafts ADD COLUMN encryption_version INTEGER DEFAULT 0")
+            columns.add("encryption_version")
+
+        # Migration: Rename legacy draft body storage to the current column.
+        if "body_text" not in columns:
+            conn.execute("ALTER TABLE drafts ADD COLUMN body_text TEXT NOT NULL DEFAULT ''")
+            if "body" in columns:
+                conn.execute("UPDATE drafts SET body_text = body")
+            conn.execute("UPDATE drafts SET encryption_version = 0")
+            columns.add("body_text")
 
         # Migration: Add body_html column if not exists
         with suppress(sqlite3.OperationalError):
@@ -199,6 +219,11 @@ class Database:
         # Migration: Add owner_identifier column if not exists
         with suppress(sqlite3.OperationalError):
             conn.execute("ALTER TABLE drafts ADD COLUMN owner_identifier TEXT NOT NULL DEFAULT ''")
+
+        # Migration: Add updated_at to legacy drafts and preserve their creation time.
+        if "updated_at" not in columns:
+            conn.execute("ALTER TABLE drafts ADD COLUMN updated_at TEXT")
+        conn.execute("UPDATE drafts SET updated_at = created_at WHERE updated_at IS NULL")
 
         # Migration: Check for plaintext drafts and encrypt them
         self._migrate_plaintext_drafts(conn)
@@ -565,6 +590,46 @@ class Database:
                 )
                 return cursor.rowcount == 1
             return True
+
+    def create_trusted_browser(
+        self,
+        token_hash: str,
+        owner_identifier: str,
+        created_at: float,
+        expires_at: float,
+    ) -> None:
+        """Store a hashed token for a browser that completed OTP verification."""
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM trusted_browsers WHERE expires_at <= ?", (created_at,))
+            conn.execute(
+                """
+                    INSERT INTO trusted_browsers (
+                        token_hash, owner_identifier, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?)
+                """,
+                (token_hash, owner_identifier, created_at, expires_at),
+            )
+
+    def get_trusted_browser_owner(self, token_hash: str, now: float) -> str | None:
+        """Return the owner of a valid trusted-browser token."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                    SELECT owner_identifier FROM trusted_browsers
+                    WHERE token_hash = ? AND expires_at > ?
+                """,
+                (token_hash, now),
+            ).fetchone()
+        return str(row["owner_identifier"]) if row is not None else None
+
+    def delete_trusted_browser(self, token_hash: str) -> bool:
+        """Revoke a trusted-browser token."""
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM trusted_browsers WHERE token_hash = ?",
+                (token_hash,),
+            )
+        return cursor.rowcount == 1
 
     # CSRF token methods
     def create_csrf_token(self, session_id: str, ttl_seconds: int = 3600) -> str:

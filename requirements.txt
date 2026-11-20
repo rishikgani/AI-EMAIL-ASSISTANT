@@ -1,4 +1,4 @@
-streamlit>=1.40,<2
+streamlit[auth]>=1.50,<2
 langchain-ollama>=0.2,<2
 langchain-openai>=0.2,<2
 langchain-anthropic>=0.2,<2
@@ -9,5 +9,5 @@ pydantic>=2.0,<3
 pydantic-settings>=2.0,<3
 structlog>=24.0,<25
 bleach>=6.0,<7
-cryptography>=42.0,<43
+cryptography>=45.0.1,<51
 aiosmtplib>=3.0,<4
